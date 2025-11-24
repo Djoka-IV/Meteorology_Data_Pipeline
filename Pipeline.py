@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Optional, List
 from datetime import datetime
 
-# Configure Logging (This looks professional)
+# Configure Logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -20,10 +20,7 @@ class LocationConfig:
     lon: float
 
 class WeatherIngestionPipeline:
-    """
-    Production-ready wrapper for Meteorological Data Ingestion.
-    Scalable to multiple locations and date ranges.
-    """
+    
     
     BASE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
@@ -31,7 +28,7 @@ class WeatherIngestionPipeline:
         self.config = config
 
     def fetch_data(self, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-        """Fetches data with error handling and timeout logic."""
+       
         params = {
             "latitude": self.config.lat,
             "longitude": self.config.lon,
