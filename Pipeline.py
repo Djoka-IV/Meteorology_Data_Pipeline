@@ -1,26 +1,36 @@
-import pandas as pd
-import requests
+# -*- coding: utf-8 -*-
+"""
+Operational Weather Risk Pipeline
+Author: Djordje Ivosevic
+"""
+
 import logging
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional
 from datetime import datetime
 
-# Configure Logging
+import pandas as pd
+import requests
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+# Configure Logging (Outputs to console)
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
 
 @dataclass
 class LocationConfig:
-    """Config object to keep variables out of logic."""
+    """Immutable configuration for target location parameters."""
     name: str
     lat: float
     lon: float
 
 class WeatherIngestionPipeline:
-    
     
     BASE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
@@ -28,7 +38,10 @@ class WeatherIngestionPipeline:
         self.config = config
 
     def fetch_data(self, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-       
+        """
+        Retrieves historical weather data from the Open-Meteo Archive API.
+        Handles connection timeouts and basic data sanitization.
+        """
         params = {
             "latitude": self.config.lat,
             "longitude": self.config.lon,
@@ -49,6 +62,9 @@ class WeatherIngestionPipeline:
             df = pd.DataFrame(data['daily'])
             df['time'] = pd.to_datetime(df['time'])
             
+            # Data imputation: Zero-fill NaNs to ensure downstream model stability
+            df = df.fillna(0)
+            
             logger.info(f"Successfully ingested {len(df)} records.")
             return df
 
@@ -57,35 +73,76 @@ class WeatherIngestionPipeline:
             return None
 
     def process_winter_risk(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Filters for winter months and flags severe weather events."""
+        """
+        Filters dataset for seasonal relevance and applies heuristic labeling.
+        Generates synthetic ground truth for model training based on operational thresholds.
+        """
         if df is None or df.empty:
-            logger.warning("No data to process.")
+            logger.warning("No data available for processing.")
             return pd.DataFrame()
 
-        # Filter: Dec (12), Jan (1), Feb (2), Mar (3)
+        # Filter: Winter Months (Dec, Jan, Feb, Mar)
         winter_df = df[df['time'].dt.month.isin([12, 1, 2, 3])].copy()
         
-        # Vectorized calculation for risk flags (Faster than iteration)
-        winter_df['risk_level'] = 'LOW'
-        winter_df.loc[winter_df['snowfall_sum'] > 2.0, 'risk_level'] = 'HIGH'
-        
-        high_risk_count = len(winter_df[winter_df['risk_level'] == 'HIGH'])
-        logger.info(f"Processed Winter Data. High Risk Events Identified: {high_risk_count}")
+        # Operational Logic: Generate binary risk labels
+        # Threshold: > 2.0 inches of snowfall constitutes a High Risk event (1)
+        winter_df['risk_label'] = 0 
+        winter_df.loc[winter_df['snowfall_sum'] > 2.0, 'risk_label'] = 1 
         
         return winter_df
 
+    def train_risk_model(self, df: pd.DataFrame):
+        """
+         trains a Logistic Regression classifier on the processed meteorological features.
+        """
+        logger.info("Initializing ML training sequence...")
+
+        # Feature Engineering
+        features = df[['temperature_2m_max', 'precipitation_sum', 'snowfall_sum']]
+        target = df['risk_label']
+
+        # Train/Test Split
+        X_train, X_test, y_train, y_test = train_test_split(features, target, test_size=0.2, random_state=42)
+
+        # Model Training
+        model = LogisticRegression()
+        model.fit(X_train, y_train)
+
+        # Validation
+        predictions = model.predict(X_test)
+        accuracy = accuracy_score(y_test, predictions)
+        
+        logger.info(f"Model Training Complete. Validation Accuracy: {accuracy:.4f}")
+        
+        return model
+
     def run(self, start: str, end: str, output_file: str):
-        """Orchestrator function."""
+        """
+        Orchestration method to execute the full ELT and ML pipeline.
+        """
+        logger.info("Pipeline execution started.")
+        
+        # 1. Ingest
         raw_data = self.fetch_data(start, end)
+        
         if raw_data is not None:
+            # 2. Transform & Label
             processed_data = self.process_winter_risk(raw_data)
+            
+            # 3. Model Training
+            if not processed_data.empty:
+                self.train_risk_model(processed_data)
+            else:
+                logger.warning("Processed dataset is empty. Skipping model training.")
+            
+            # 4. Export
             processed_data.to_csv(output_file, index=False)
-            logger.info(f"Pipeline complete. Data exported to {output_file}")
+            logger.info(f"Pipeline complete. Data serialized to {output_file}")
 
 if __name__ == "__main__":
-    # Configuration is now separated from logic
+    # Initialize Configuration
     target_loc = LocationConfig(name="Blacksburg_VA", lat=37.229, lon=-80.413)
     
-    # Initialize and Run
+    # Execute Pipeline
     pipeline = WeatherIngestionPipeline(target_loc)
     pipeline.run(start="1990-01-01", end="2023-12-31", output_file="blacksburg_winter_risk.csv")
